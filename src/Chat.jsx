@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { supabase } from './supabase.js'
 import Avatar from './Avatar.jsx'
-import { speak, stopSpeaking, listen, canListen } from './voice.js'
+import { speak, stopSpeaking, listen, canListen, frenchVoices, getVoiceName, setVoiceName } from './voice.js'
 
 function testReply(text) {
   const t = text.toLowerCase()
@@ -19,18 +19,32 @@ function testReply(text) {
 
 export default function Chat() {
   const [messages, setMessages] = useState([])
-  const [convId, setConvId] = useState(null)
   const [text, setText] = useState('')
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
-  const end = useRef(null)
-  const rec = useRef(null)
   const [listening, setListening] = useState(false)
   const [speaking, setSpeaking] = useState(false)
+  const [talkOn, setTalkOn] = useState(false)
   const [voiceOn, setVoiceOn] = useState(true)
+  const [voices, setVoices] = useState([])
+  const [vName, setVName] = useState(getVoiceName())
+  const end = useRef(null)
+  const rec = useRef(null)
+  const conv = useRef(null)
+  const talk = useRef(false)
+  const working = useRef(false)
+  const talking = useRef(false)
+  const voiceRef = useRef(true)
+  const silent = useRef(0)
 
   useEffect(() => {
     load()
+    frenchVoices().then(setVoices)
+    return () => {
+      talk.current = false
+      stopSpeaking()
+      if (rec.current) rec.current.stop()
+    }
   }, [])
 
   useEffect(() => {
@@ -44,7 +58,7 @@ export default function Chat() {
       .order('created_at', { ascending: false })
       .limit(1)
     if (!convs || !convs.length) return
-    setConvId(convs[0].id)
+    conv.current = convs[0].id
     const { data } = await supabase
       .from('messages')
       .select('id, role, content')
@@ -61,14 +75,81 @@ export default function Chat() {
       .single()
     return data
   }
-  async function send(e, spoken) {
+
+  function done() {
+    working.current = false
+    setBusy(false)
+  }
+
+  function stopTalk() {
+    talk.current = false
+    setTalkOn(false)
+    stopSpeaking()
+    talking.current = false
+    setSpeaking(false)
+    if (rec.current) rec.current.stop()
+  }
+
+  function startListen() {
+    if (!talk.current || working.current || talking.current || rec.current) return
+    rec.current = listen(
+      (t) => {
+        silent.current = 0
+        send(null, t)
+      },
+      () => {
+        rec.current = null
+        setListening(false)
+        if (talk.current && !working.current && !talking.current) setTimeout(startListen, 300)
+      },
+      (m, code) => {
+        if (code === 'no-speech') {
+          silent.current += 1
+          if (silent.current >= 3) {
+            stopTalk()
+            setErr('Conversation vocale arrêtée : je n’ai rien entendu.')
+          }
+          return
+        }
+        stopTalk()
+        setErr(m)
+      }
+    )
+    if (rec.current) setListening(true)
+    else stopTalk()
+  }
+
+  function toggleMic() {
+    if (talk.current) {
+      stopTalk()
+      return
+    }
+    setErr('')
+    silent.current = 0
+    talk.current = true
+    setTalkOn(true)
+    stopSpeaking()
+    talking.current = false
+    setSpeaking(false)
+    startListen()
+  }
+
+  function afterSpeech() {
+    talking.current = false
+    setSpeaking(false)
+    if (talk.current) startListen()
+  }  async function send(e, spoken) {
     if (e) e.preventDefault()
     const content = (spoken || text).trim()
-    if (!content || busy) return
+    if (!content || working.current) return
+    working.current = true
     setBusy(true)
     setErr('')
     setText('')
-    let id = convId
+    stopSpeaking()
+    talking.current = false
+    setSpeaking(false)
+    let id = conv.current
     if (!id) {
       const { data } = await supabase
         .from('conversations')
@@ -77,54 +158,88 @@ export default function Chat() {
         .single()
       if (!data) {
         setErr('Impossible d’enregistrer la conversation.')
-        setBusy(false)
+        done()
         return
       }
       id = data.id
-      setConvId(id)
+      conv.current = id
     }
     const mine = await save(id, 'user', content)
     if (!mine) {
       setErr('Message non enregistré. Réessayez.')
-      setBusy(false)
+      done()
       return
     }
     setMessages((m) => [...m, mine])
     const bot = await save(id, 'assistant', testReply(content))
-    if (bot) {
-      setMessages((m) => [...m, bot])
-      if (voiceOn) speak(bot.content, () => setSpeaking(true), () => setSpeaking(false))
-    }
-    setBusy(false)
-  }  function toggleMic() {
-    if (listening) {
-      if (rec.current) rec.current.stop()
+    done()
+    if (!bot) {
+      if (talk.current) startListen()
       return
     }
-    stopSpeaking()
-    setSpeaking(false)
-    setErr('')
-    rec.current = listen(
-      (t) => send(null, t),
-      () => setListening(false),
-      (m) => setErr(m)
-    )
-    if (rec.current) setListening(true)
+    setMessages((m) => [...m, bot])
+    if (voiceRef.current) {
+      speak(bot.content, () => { talking.current = true; setSpeaking(true) }, afterSpeech)
+    } else if (talk.current) {
+      startListen()
+    }
   }
 
   function fresh() {
     stopSpeaking()
+    talking.current = false
     setSpeaking(false)
-    setConvId(null)
+    conv.current = null
     setMessages([])
   }
+
+  function toggleVoice() {
+    const on = !voiceOn
+    setVoiceOn(on)
+    voiceRef.current = on
+    if (!on) {
+      stopSpeaking()
+      talking.current = false
+      setSpeaking(false)
+    }
+  }
+
+  function pickVoice(e) {
+    const n = e.target.value
+    setVoiceName(n)
+    setVName(n)
+    speak('Bonjour, je suis WACHITA.', () => setSpeaking(true), () => setSpeaking(false))
+  }
+
+  const label = listening
+    ? 'Je vous écoute…'
+    : speaking
+      ? 'WACHITA répond…'
+      : busy
+        ? 'Je réfléchis…'
+        : talkOn
+          ? 'Conversation vocale active'
+          : ' '
 
   return (
     <div className="chat">
       <div className="top">
         <h1 className="logo">WACHITA</h1>
         <div>
-          <button className="link" onClick={() => { stopSpeaking(); setSpeaking(false); setVoiceOn(!voiceOn) }}>
+          {voices.length > 1 && (
+            <select
+              value={vName}
+              onChange={pickVoice}
+              aria-label="Choisir la voix"
+              style={{ background: '#ffffff10', color: 'var(--cr)', border: '1px solid #ffffff22', borderRadius: 8, padding: '3px 6px', fontSize: 13, maxWidth: 130, marginRight: 8 }}
+            >
+              <option value="">Voix auto</option>
+              {voices.map((v) => (
+                <option key={v.name} value={v.name}>{v.name}</option>
+              ))}
+            </select>
+          )}
+          <button className="link" onClick={toggleVoice}>
             {voiceOn ? 'Voix : activée' : 'Voix : coupée'}
           </button>
           {' · '}
@@ -150,7 +265,7 @@ export default function Chat() {
         ))}
         <div ref={end} />
       </div>
-      <p className="state">{listening ? 'Je vous écoute…' : speaking ? 'WACHITA répond…' : ' '}</p>
+      <p className="state">{label}</p>
       {err && <p className="err">{err}</p>}
       <form className="bar" onSubmit={send}>
         <input
@@ -160,8 +275,19 @@ export default function Chat() {
           onChange={(e) => setText(e.target.value)}
         />
         {canListen && (
-          <button type="button" className={'mic' + (listening ? ' on' : '')} onClick={toggleMic} aria-label="Parler à WACHITA">
-            <svg viewBox="0 0 24 24"><path d="M12 15a4 4 0 0 0 4-4V6a4 4 0 0 0-8 0v5a4 4 0 0 0 4 4zm6-4a6 6 0 0 1-12 0H4a8 8 0 0 0 7 7.94V22h2v-3.06A8 8 0 0 0 20 11z" /></svg>
+          <button
+            type="button"
+            className={'mic' + (talkOn ? ' on' : '')}
+            onClick={toggleMic}
+            aria-label={talkOn ? 'Arrêter la conversation vocale' : 'Parler à WACHITA'}
+          >
+            <svg viewBox="0 0 24 24">
+              {talkOn ? (
+                <path d="M7 7h10v10H7z" />
+              ) : (
+                <path d="M12 15a4 4 0 0 0 4-4V6a4 4 0 0 0-8 0v5a4 4 0 0 0 4 4zm6-4a6 6 0 0 1-12 0H4a8 8 0 0 0 7 7.94V22h2v-3.06A8 8 0 0 0 20 11z" />
+              )}
+            </svg>
           </button>
         )}
         <button className="btn" disabled={busy}>Envoyer</button>
