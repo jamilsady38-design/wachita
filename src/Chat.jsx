@@ -70,7 +70,7 @@ export default function Chat() {
         .select('id')
         .single()
       if (!data) {
-        setErr('Impossible d’enregistrer la conversation.')
+        setErr('Impossible d’enregistrer la conversation.'); supabase.from('conversations').insert({ title: 'test' }).then((r) => setErr('Erreur Supabase : ' + (r.error ? r.error.message : 'aucune')))
         setBusy(false)
         return
       }
