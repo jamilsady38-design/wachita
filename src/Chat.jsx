@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { supabase } from './supabase.js'
+import Avatar from './Avatar.jsx'
+import { speak, stopSpeaking, listen, canListen } from './voice.js'
 
 function testReply(text) {
   const t = text.toLowerCase()
@@ -22,6 +24,10 @@ export default function Chat() {
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
   const end = useRef(null)
+  const rec = useRef(null)
+  const [listening, setListening] = useState(false)
+  const [speaking, setSpeaking] = useState(false)
+  const [voiceOn, setVoiceOn] = useState(true)
 
   useEffect(() => {
     load()
@@ -55,9 +61,9 @@ export default function Chat() {
       .single()
     return data
   }
-  async function send(e) {
-    e.preventDefault()
-    const content = text.trim()
+  async function send(e, spoken) {
+    if (e) e.preventDefault()
+    const content = (spoken || text).trim()
     if (!content || busy) return
     setBusy(true)
     setErr('')
@@ -70,7 +76,7 @@ export default function Chat() {
         .select('id')
         .single()
       if (!data) {
-        setErr('Impossible d’enregistrer la conversation.'); supabase.from('conversations').insert({ title: 'test' }).then((r) => setErr('Erreur Supabase : ' + (r.error ? r.error.message : 'aucune')))
+        setErr('Impossible d’enregistrer la conversation.')
         setBusy(false)
         return
       }
@@ -85,11 +91,30 @@ export default function Chat() {
     }
     setMessages((m) => [...m, mine])
     const bot = await save(id, 'assistant', testReply(content))
-    if (bot) setMessages((m) => [...m, bot])
+    if (bot) {
+      setMessages((m) => [...m, bot])
+      if (voiceOn) speak(bot.content, () => setSpeaking(true), () => setSpeaking(false))
+    }
     setBusy(false)
+  }  function toggleMic() {
+    if (listening) {
+      if (rec.current) rec.current.stop()
+      return
+    }
+    stopSpeaking()
+    setSpeaking(false)
+    setErr('')
+    rec.current = listen(
+      (t) => send(null, t),
+      () => setListening(false),
+      (m) => setErr(m)
+    )
+    if (rec.current) setListening(true)
   }
 
   function fresh() {
+    stopSpeaking()
+    setSpeaking(false)
     setConvId(null)
     setMessages([])
   }
@@ -99,10 +124,17 @@ export default function Chat() {
       <div className="top">
         <h1 className="logo">WACHITA</h1>
         <div>
+          <button className="link" onClick={() => { stopSpeaking(); setSpeaking(false); setVoiceOn(!voiceOn) }}>
+            {voiceOn ? 'Voix : activée' : 'Voix : coupée'}
+          </button>
+          {' · '}
           <button className="link" onClick={fresh}>Nouvelle conversation</button>
           {' · '}
           <button className="link" onClick={() => supabase.auth.signOut()}>Déconnexion</button>
         </div>
+      </div>
+      <div className={'avwrap' + (messages.length ? ' sm' : '')}>
+        <Avatar speaking={speaking} listening={listening} />
       </div>
       <div className="msgs">
         {messages.length === 0 && (
@@ -118,6 +150,7 @@ export default function Chat() {
         ))}
         <div ref={end} />
       </div>
+      <p className="state">{listening ? 'Je vous écoute…' : speaking ? 'WACHITA répond…' : ' '}</p>
       {err && <p className="err">{err}</p>}
       <form className="bar" onSubmit={send}>
         <input
@@ -126,6 +159,11 @@ export default function Chat() {
           value={text}
           onChange={(e) => setText(e.target.value)}
         />
+        {canListen && (
+          <button type="button" className={'mic' + (listening ? ' on' : '')} onClick={toggleMic} aria-label="Parler à WACHITA">
+            <svg viewBox="0 0 24 24"><path d="M12 15a4 4 0 0 0 4-4V6a4 4 0 0 0-8 0v5a4 4 0 0 0 4 4zm6-4a6 6 0 0 1-12 0H4a8 8 0 0 0 7 7.94V22h2v-3.06A8 8 0 0 0 20 11z" /></svg>
+          </button>
+        )}
         <button className="btn" disabled={busy}>Envoyer</button>
       </form>
     </div>
